@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Resident Evil 6 Save Editor
+Comment=Edit Resident Evil 6 PC save files
+Exec=RE6SaveEditor
+Icon=re6-save-editor
+Categories=Utility;
+Terminal=false

@@ -1,0 +1,116 @@
+name: Linux AppImage
+
+on:
+  push:
+    branches: [main, linux-appimage]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  appimage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build qt6-base-dev qt6-wayland libfuse2 xvfb
+      - name: Configure and build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build build --parallel
+          ctest --test-dir build --output-on-failure
+          DESTDIR="$PWD/AppDir" cmake --install build
+      - name: Install linuxdeploy
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O linuxdeploy
+          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage -O linuxdeploy-plugin-qt
+          chmod +x linuxdeploy linuxdeploy-plugin-qt
+      - name: Package and smoke-test AppImage
+        env:
+          LINUXDEPLOY_OUTPUT_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'continuous' }}
+          EXTRA_PLATFORM_PLUGINS: libqwayland-egl.so;libqwayland-generic.so
+        run: |
+          export PATH="$PWD:$PATH"
+          export QMAKE=/usr/lib/qt6/bin/qmake
+          export LDAI_OUTPUT="$PWD/RE6SaveEditor-${LINUXDEPLOY_OUTPUT_VERSION}-x86_64.AppImage"
+          ./linuxdeploy --appdir AppDir --plugin qt --output appimage
+          test -s "$LDAI_OUTPUT"
+          chmod +x "$LDAI_OUTPUT"
+
+          # Verify both X11/XCB and native Wayland plugins are bundled.
+          test -f AppDir/usr/plugins/platforms/libqxcb.so
+          test -f AppDir/usr/plugins/platforms/libqwayland-egl.so
+          test -f AppDir/usr/plugins/platforms/libqwayland-generic.so
+
+          # Validate the Type 2 runtime can extract the image and that the
+          # bundled application launches in a headless CI display.
+          mkdir appimage-smoke-test
+          cd appimage-smoke-test
+          "$LDAI_OUTPUT" --appimage-extract
+          test -x squashfs-root/AppRun
+          test -x squashfs-root/usr/bin/RE6SaveEditor
+          test -f squashfs-root/usr/plugins/platforms/libqxcb.so
+          test -f squashfs-root/usr/plugins/platforms/libqwayland-egl.so
+          test -f squashfs-root/usr/plugins/platforms/libqwayland-generic.so
+          set +e
+          xvfb-run -a timeout 5s ./squashfs-root/AppRun
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
+            echo "AppImage smoke test failed with exit code $status"
+            exit "$status"
+          fi
+          cd ..
+      - uses: actions/upload-artifact@v7
+        with:
+          name: RE6SaveEditor-AppImage
+          path: RE6SaveEditor-*.AppImage
+          if-no-files-found: error
+
+  # Keep release write access separate from the build that executes downloaded
+  # packaging tools; this job only uploads the already-built artifact.
+  # The explicit release commit is used only for the first release; subsequent releases use tags.
+  release:
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'push' && github.ref == 'refs/heads/main' && (github.event.head_commit.message == 'Release v1.0.0' || github.event.head_commit.message == 'Release v1.0.1'))
+    needs: appimage
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || (github.event.head_commit.message == 'Release v1.0.1' && 'v1.0.1') || 'v1.0.0' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: RE6SaveEditor-AppImage
+      - name: Include the existing Windows package in the first release
+        if: env.RELEASE_TAG == 'v1.0.0'
+        run: |
+          test -s release/RE6SaveEditor-v1.0.0-win64.zip
+          cp release/RE6SaveEditor-v1.0.0-win64.zip .
+      - name: Version AppImage for the release
+        run: |
+          if [ -f RE6SaveEditor-continuous-x86_64.AppImage ]; then
+            mv RE6SaveEditor-continuous-x86_64.AppImage "RE6SaveEditor-${RELEASE_TAG}-x86_64.AppImage"
+          fi
+          test -s "RE6SaveEditor-${RELEASE_TAG}-x86_64.AppImage"
+      - name: Publish GitHub release with AppImage
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: RE6 Save Editor ${{ env.RELEASE_TAG }}
+          body_path: release/${{ env.RELEASE_TAG }}.md
+          body: |
+            First public release of the native Linux Qt 6 AppImage alongside the original Windows version.
+            The default CI tests use synthetic data. Personal savedata.bin files are not included.
+          files: |
+            RE6SaveEditor-*.AppImage
+            RE6SaveEditor-*-win64.zip

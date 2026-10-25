@@ -1,0 +1,10 @@
+# Private game-save data: never commit personal saves
+/savedata.bin
+/tests/savedata.bin
+*.bak
+
+# Local build and packaging output
+/build/
+/AppDir/
+/RE6SaveEditor-*.AppImage
+*.tmp
